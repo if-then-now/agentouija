@@ -1,0 +1,65 @@
+# Agent Ouija — Python dependencies
+#
+# Tested with Python 3.11 / 3.12 on Windows 11 (Brainy: RTX 5080).
+# Python 3.14 has worked in practice but onnxruntime (Piper TTS dep) may
+# lag behind on prebuilt wheels.
+#
+# Install:
+#   pip install -r requirements.txt
+#
+# Optional sections at the bottom — read the comments before uncommenting.
+
+# ── Web UI ────────────────────────────────────────────────────────────────────
+# Pinned to exact version — rigs on different Gradio minors have shown
+# real behavioural drift (tab-switching queue, CSS class names for the
+# tab bar, `col_count` deprecation, `scale=` on Markdown, etc.). Bump
+# this in lockstep on every rig when you upgrade. Currently on 6.x.
+gradio==6.19.0
+
+# ── Vector DB + RAG ───────────────────────────────────────────────────────────
+chromadb>=0.5
+llama-index-core>=0.10
+llama-index-embeddings-huggingface>=0.2
+llama-index-vector-stores-chroma>=0.2
+llama-index-llms-ollama>=0.2
+# HuggingFace embedding backbone (BAAI/bge-small-en-v1.5). Pulled in
+# transitively by llama-index-embeddings-huggingface, pinned here so
+# upgrades don't silently break the 384-dim embedding contract.
+sentence-transformers>=2.7
+
+# ── Cloud model gateway ──────────────────────────────────────────────────────
+# LiteLLM normalizes Anthropic / OpenAI / Gemini / Groq / OpenRouter so
+# arena_ui.py speaks one API across providers + handles web_search tools.
+litellm>=1.40
+
+# ── HTTP + env ───────────────────────────────────────────────────────────────
+requests>=2.31
+python-dotenv>=1.0
+
+# ── Google Calendar (Assistant section) — OPTIONAL ──────────────────────────
+# Only needed if you want to read/add/delete events from within Agent
+# Ouija. Skip if you don't plan to use the Calendar features.
+# See config.py + scripts/gcal.py for the one-time OAuth setup.
+google-api-python-client>=2.100
+google-auth-oauthlib>=1.0
+
+# ── Image editing (Gemini Nano Banana) — OPTIONAL ────────────────────────────
+# Powers instruction-based image editing when a media filename is
+# referenced in Ask For Revelations. Reuses GEMINI_API_KEY. Skip if you
+# don't want the "add a heart between the two people, dog.png" flow —
+# the app runs fine without it (edit intent surfaces a friendly missing-
+# dep message instead of crashing).
+google-genai>=1.0
+Pillow>=10.0
+
+# ── Voice (Arena tab) — OPTIONAL ─────────────────────────────────────────────
+# Comment out the next line on rigs that don't need TTS. Without piper-tts
+# installed, the Voice toggle in the Arena tab silently no-ops (the synth
+# wrapper degrades to None on ImportError).
+piper-tts>=1.2
+
+# ── Notes ────────────────────────────────────────────────────────────────────
+# Not pip-installed:
+#   - Ollama runtime (https://ollama.com/download) — required for local models
+#   - Piper voice files (.onnx + .onnx.json) — downloaded into voices/ at
+#     setup time, see USER_GUIDE.md
