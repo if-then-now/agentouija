@@ -519,7 +519,7 @@ lands with three attachments. Cleaner than three emails.
 
 ---
 
-## Tab 4 — Persona — JARVIS for Agent Ouija
+## Tab 4 — Persona
 
 Turn your Agent Ouija into any voice / character you want. Three
 levels of customisation, from minimal to full immersion.
@@ -621,7 +621,7 @@ Voices download from <https://huggingface.co/rhasspy/piper-voices>.
 
 ---
 
-## Tab 5 — Data — accounting and training stats
+## Tab 5 — Data
 
 Everything numeric about your Agent Ouija usage lives here.
 

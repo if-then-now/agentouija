@@ -5,9 +5,9 @@ import math
 # BASE_DIR resolves dynamically to the repo root — config.py sits under
 # scripts/, so parent.parent gives the folder that contains scripts/, docs/,
 # prompts/, data/, etc. This lets install.py + arena_ui.py work from any
-# clone location: C:\AgentOuija\ on Brainy, C:\Users\<tester>\Downloads\
-# agentouija-main\ on a fresh tester rig, or anywhere else. No env var,
-# no user config — the code follows the checkout.
+# clone location — C:\AgentOuija\, C:\Users\<name>\Downloads\agentouija-main\,
+# ~/agentouija on Linux, wherever. No env var, no user config — the code
+# follows the checkout.
 BASE_DIR               = Path(__file__).resolve().parent.parent
 
 # .env location — preferred is out of the repo tree so a repo
@@ -160,9 +160,9 @@ def compute_reading_with_cost(score: int,
     return round((score / SCORE_MAX) / time_penalty / cost_penalty, 6)
 
 # ── Models ────────────────────────────────────────────────────────────────────
-# Rig policy: western-origin models only on Brainy (US/EU/allied nations).
-# Non-western models (Qwen, DeepSeek, Falcon) → separate rig, future.
-# Command R (Cohere, Canada) → Brainy, future.
+# Default rig policy: western-origin models only (US / EU / allied nations).
+# Non-western models (Qwen, DeepSeek, Falcon) are commented out below — flip
+# them on if that's your fit. Command R (Cohere, Canada) is a planned add.
 #
 # To add a local model:
 #   1. ollama pull <model_name>
@@ -335,7 +335,7 @@ AVAILABLE_MODELS = {
         "private_corpus": False,
     },
 
-    # ── Future — Brainy ───────────────────────────────────────────────────────
+    # ── Future — planned additions ────────────────────────────────────────────
     # "command-r": {
     #     "name":         "command-r",
     #     "type":         "local",
