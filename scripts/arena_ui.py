@@ -2958,9 +2958,19 @@ def build_ui():
                             _EXEC_TIER_LABELS[2], variant="secondary",
                             elem_id="ao_exec_csuite_btn",
                         )
-                    ao_exec_tier_state = gr.State(MYSTICISM_LEVELS[0])
+                    # Match the exec tier + dropdown to whichever Mysticism
+                    # Level the user is restoring to. Previously this was
+                    # hardcoded to Low, which caused a crash on locals-only
+                    # rigs when a stale "Claude Sonnet" pref met a Low-tier
+                    # locals-only choice list (Gradio's Dropdown preprocess
+                    # rejects any value not in current choices). Aligning
+                    # initial state with the saved level eliminates the
+                    # mismatch class entirely.
+                    _initial_exec_level = _default_level()
+                    ao_exec_tier_state = gr.State(_initial_exec_level)
                     ao_exec_tier_display = gr.Markdown(
-                        f"Selected: **{_EXEC_TIER_LABELS[0]}** ({MYSTICISM_LEVELS[0]})"
+                        f"Selected: **{_EXEC_TIER_LABELS[_level_index(_initial_exec_level)]}** "
+                        f"({_initial_exec_level})"
                     )
                     # Default executive persisted at data/default_executive.txt.
                     # Presence + value pre-selects the dropdown on UI load.
@@ -2975,20 +2985,53 @@ def build_ui():
                                 return None
                         return None
 
+                    # Compute the initial exec choices from the SAVED level's
+                    # tier, not a hardcoded Low. Mirrors _exec_choices_for
+                    # (defined later — same math, kept in sync).
+                    def _exec_keys_for_tier(tier: str) -> list:
+                        i = _level_index(tier)
+                        if i == 0:
+                            return list(LOCAL_KEYS)
+                        if i == 1:
+                            return list(LOCAL_KEYS) + list(CLOUD_KEYS)
+                        return [m for m in CLOUD_KEYS if m in WEB_CAPABLE]
+
                     _saved_default_exec = _load_default_exec()
                     _initial_exec_choices = [
-                        AVAILABLE_MODELS[m]["display_name"] for m in LOCAL_KEYS
+                        AVAILABLE_MODELS[m]["display_name"]
+                        for m in _exec_keys_for_tier(_initial_exec_level)
                     ]
-                    _initial_exec_value = (
-                        _saved_default_exec
-                        if _saved_default_exec in _initial_exec_choices
-                        else (_initial_exec_choices[0] if _initial_exec_choices else None)
-                    )
+                    # Priority: explicit default_executive.txt → last-used
+                    # from prefs → Claude Sonnet fallback (Medium+ only) →
+                    # first available. Each candidate must be IN choices
+                    # so the initial value can never mismatch the initial
+                    # choices list.
+                    _initial_exec_value: Optional[str] = None
+                    if _saved_default_exec and _saved_default_exec in _initial_exec_choices:
+                        _initial_exec_value = _saved_default_exec
+                    else:
+                        _last_used = prefs.load().get("last_executive")
+                        if _last_used and _last_used in _initial_exec_choices:
+                            _initial_exec_value = _last_used
+                        else:
+                            _claude_display = AVAILABLE_MODELS.get("claude-sonnet", {}).get("display_name")
+                            if (_level_index(_initial_exec_level) >= 1
+                                    and _claude_display in _initial_exec_choices):
+                                _initial_exec_value = _claude_display
+                            elif _initial_exec_choices:
+                                _initial_exec_value = _initial_exec_choices[0]
 
+                    # allow_custom_value=True prevents Gradio from raising
+                    # when a stale/mismatched value slips through from the
+                    # client (race between choices-update and value-update
+                    # on tier switches). Handlers below snap invalid values
+                    # to a valid one, so the app degrades gracefully instead
+                    # of crashing the queue.
                     ao_exec_model = gr.Dropdown(
                         choices=_initial_exec_choices,
                         value=_initial_exec_value,
                         label="👑 Executive Model",
+                        allow_custom_value=True,
                     )
                     ao_default_exec_toggle = gr.Checkbox(
                         value=(_saved_default_exec == _initial_exec_value
@@ -5031,8 +5074,17 @@ def build_ui():
                     # this fires on EVERY pick, no click needed.
                     # Handler runs on programmatic updates too (e.g.
                     # tier change repopulating the dropdown); we
-                    # only persist non-empty picks.
-                    if current_display:
+                    # only persist non-empty picks that map to a
+                    # REAL model. Guards against persisting stale
+                    # / mismatched values (e.g. "Claude Sonnet" coming
+                    # through on a locals-only rig) which would then
+                    # crash a subsequent launch.
+                    _known_displays = {
+                        cfg.get("display_name")
+                        for cfg in AVAILABLE_MODELS.values()
+                        if cfg.get("display_name")
+                    }
+                    if current_display and current_display in _known_displays:
                         try:
                             prefs.update(last_executive=current_display)
                         except Exception as e:
