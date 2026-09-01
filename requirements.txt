@@ -36,6 +36,14 @@ litellm>=1.40
 requests>=2.31
 python-dotenv>=1.0
 
+# ── Executive API sidecar (scripts/agent_ouija_api.py) ───────────────────────
+# Exposes POST /api/executive so downstream orchestrator apps (Master
+# Ouija being the first) can drive the Boardroom flow programmatically
+# without the Gradio UI. Gradio itself already pulls in FastAPI, so this
+# is essentially a version-pin + explicit uvicorn install.
+fastapi>=0.115
+uvicorn[standard]>=0.30
+
 # ── Google Calendar (Assistant section) — OPTIONAL ──────────────────────────
 # Only needed if you want to read/add/delete events from within Agent
 # Ouija. Skip if you don't plan to use the Calendar features.
