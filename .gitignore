@@ -223,3 +223,11 @@ Agent Ouija.bat
 # Legacy launcher name (pre-rebrand) — keep ignored so an old file
 # hanging around doesn't accidentally get committed.
 Mr. Ouija.bat
+
+# Master Ouija — WIP sister project developing under this repo during
+# Phases 1-3 (Vaesen + Discworld MVP). Ships as its own public repo
+# `if-then-now/masterouija` once the edge-GM story is proven. Ignored
+# wholesale here to keep prototyping fast and prevent the copyrighted
+# rulebooks / game saves / trained RAG stores under it from ever
+# reaching the public agent-ouija repo.
+masterouija/
