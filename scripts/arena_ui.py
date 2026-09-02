@@ -2595,19 +2595,83 @@ def build_ui():
             }""",
         )
 
-        # Default to dark theme on first visit — if the URL has no
-        # `__theme=` param yet, redirect to `?__theme=dark`. The theme
-        # toggle button above sets the param explicitly, so once a user
-        # picks light or dark this redirect no longer fires.
+        # No forced-theme redirect on first visit anymore.
+        #
+        # The previous implementation ran a `window.location = ...`
+        # navigation from a demo.load() JS block to default the URL to
+        # `?__theme=dark`. That was a full page reload — which meant
+        # any text a fast-typing user had already entered in the
+        # question textbox got wiped when the reload fired (demo.load
+        # doesn't run until after the page has mounted, giving the
+        # user a small window to start typing before the redirect).
+        #
+        # Users now get the system-preference theme on first visit;
+        # the 🌓 Toggle Theme button in the header still swaps to a
+        # specific `__theme=` value and reloads (with the user's
+        # explicit consent), and the choice sticks via the URL.
+
+        # Question textbox draft persistence.
+        #
+        # Save every keystroke in ao_question to localStorage and
+        # restore on page mount. Belt-and-braces protection against
+        # ANY event that wipes the textbox — accidental theme toggle,
+        # F5, tab close-and-reopen, browser restart, Gradio websocket
+        # reconnect. The draft is cleared when the user clicks any
+        # Ask button (they've committed the question and don't need
+        # a lingering draft after).
         demo.load(
             fn=None,
-            js="""() => {
-                const url = new URL(window.location);
-                if (!url.searchParams.get('__theme')) {
-                    url.searchParams.set('__theme', 'dark');
-                    window.location = url.toString();
+            js=r"""
+            () => {
+              const STORAGE_KEY = 'agent_ouija_question_draft';
+              const findQ = () =>
+                document.querySelector(
+                  '#ao_question textarea, #ao_question input'
+                );
+
+              const attach = () => {
+                const q = findQ();
+                if (!q) return false;
+
+                // Restore any prior draft, but only if the box is empty
+                // (don't overwrite in-flight typing on re-mount).
+                try {
+                  const saved = localStorage.getItem(STORAGE_KEY);
+                  if (saved && !q.value) {
+                    q.value = saved;
+                    // Fire input so React/Gradio's own state notices.
+                    q.dispatchEvent(new Event('input', {bubbles: true}));
+                  }
+                } catch (e) { /* localStorage denied — degrade silently */ }
+
+                // Save every keystroke.
+                q.addEventListener('input', () => {
+                  try { localStorage.setItem(STORAGE_KEY, q.value); }
+                  catch (e) {}
+                });
+
+                // Clear the draft when the user clicks any Ask button.
+                for (const askId of ['ao_ask_btn', 'ao_ask_lore_btn']) {
+                  const host = document.getElementById(askId);
+                  if (!host) continue;
+                  const btn = host.querySelector('button') || host;
+                  btn.addEventListener('click', () => {
+                    try { localStorage.removeItem(STORAGE_KEY); }
+                    catch (e) {}
+                  });
                 }
-            }""",
+                return true;
+              };
+
+              // Gradio may mount the textbox after this hook fires; retry
+              // for a couple seconds so the listeners land regardless.
+              if (attach()) return;
+              let tries = 0;
+              const t = setInterval(() => {
+                if (attach() || ++tries > 40) clearInterval(t);
+              }, 100);
+            }
+            """,
         )
 
         with gr.Tabs(elem_id="ao_main_tabs") as ao_tabs:
