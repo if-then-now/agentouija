@@ -187,14 +187,23 @@ def log_score(
 #    "input_cost": float, "output_cost": float}
 
 
-def _query_local(model_cfg: dict, messages: list) -> dict:
+def _query_local(model_cfg: dict, messages: list,
+                  max_tokens: int | None = None) -> dict:
+    """Call a local model via Ollama's /api/chat.
+
+    max_tokens (optional) → Ollama's `options.num_predict`, capping the
+    output. None = model default (unbounded until context fills).
+    """
+    body: dict = {
+        "model":    model_cfg["name"],
+        "messages": messages,
+        "stream":   False,
+    }
+    if max_tokens:
+        body["options"] = {"num_predict": int(max_tokens)}
     resp = _HTTP.post(
         f"{OLLAMA_BASE_URL}/api/chat",
-        json={
-            "model":    model_cfg["name"],
-            "messages": messages,
-            "stream":   False,
-        },
+        json=body,
         timeout=OLLAMA_TIMEOUT,
     )
     resp.raise_for_status()
@@ -212,7 +221,15 @@ def _query_local(model_cfg: dict, messages: list) -> dict:
     }
 
 
-def _query_cloud(model_key: str, model_cfg: dict, messages: list) -> dict:
+def _query_cloud(model_key: str, model_cfg: dict, messages: list,
+                  max_tokens: int | None = None) -> dict:
+    """Call a cloud model via LiteLLM.
+
+    max_tokens (optional) — the max_tokens knob passed to LiteLLM.
+    Default 1024 preserves the previous behaviour; the /api/executive
+    sidecar overrides based on caller-supplied response length so
+    downstream apps (Master Ouija) can enforce a shorter cap.
+    """
     # Lazy import: litellm is heavy; only pay the cost if a cloud model is selected.
     from litellm import completion as litellm_completion
     from litellm import cost_per_token
@@ -228,7 +245,7 @@ def _query_cloud(model_key: str, model_cfg: dict, messages: list) -> dict:
         model=model_cfg["name"],
         messages=messages,
         api_key=api_key,
-        max_tokens=1024,
+        max_tokens=int(max_tokens) if max_tokens else 1024,
     )
 
     usage = getattr(resp, "usage", None) or {}

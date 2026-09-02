@@ -151,11 +151,14 @@ def _exec_messages(question: str, peer_answers: list[dict],
 
 # ── Model call thin wrappers ──────────────────────────────────────────────────
 
-def _run_one_model(model_key: str, messages: list[dict]) -> dict:
+def _run_one_model(model_key: str, messages: list[dict],
+                     max_tokens: Optional[int] = None) -> dict:
     """Route to _query_local or _query_cloud based on model type.
 
-    Returns the standard result dict from arena.py plus display_name +
-    model_key for provenance.
+    max_tokens (optional) is threaded through so callers can cap the
+    output length — Master Ouija's Terse/Standard/Rich response-length
+    presets rely on this. None = model default (~1024 for cloud,
+    unbounded for local).
     """
     cfg = AVAILABLE_MODELS.get(model_key)
     if not cfg:
@@ -164,9 +167,9 @@ def _run_one_model(model_key: str, messages: list[dict]) -> dict:
     start = time.perf_counter()
     try:
         if cfg.get("type") == "local":
-            result = _query_local(cfg, messages)
+            result = _query_local(cfg, messages, max_tokens=max_tokens)
         else:
-            result = _query_cloud(model_key, cfg, messages)
+            result = _query_cloud(model_key, cfg, messages, max_tokens=max_tokens)
     except Exception as e:                              # noqa: BLE001
         log.warning("Model %s unavailable (%s): %s", model_key, type(e).__name__, e)
         result = _empty_result(round(time.perf_counter() - start, 3))
@@ -240,9 +243,20 @@ def executive(req: ExecutiveRequest):
     start = time.perf_counter()
     peers, exec_key = _peer_and_exec_for(req.tier)
 
+    # Peer answers stay short regardless of the caller's target — they
+    # feed into the exec's synthesis, not the user, and a tight cap
+    # keeps the fan-out fast + the exec's context tidy. The exec
+    # itself honours the caller's max_tokens verbatim.
+    peer_cap = min(req.max_tokens, 400) if req.max_tokens else 400
+    exec_cap = req.max_tokens                    # None = library default
+
     # ── Single-model shortcut ────────────────────────────────────────────────
     if not req.boardroom_mode:
-        result = _run_one_model(exec_key, _peer_messages(req.question, req.tone_prompt or ""))
+        result = _run_one_model(
+            exec_key,
+            _peer_messages(req.question, req.tone_prompt or ""),
+            max_tokens=exec_cap,
+        )
         return _build_response(
             answer      = result.get("text") or "",
             tier        = req.tier,
@@ -257,14 +271,17 @@ def executive(req: ExecutiveRequest):
     peer_msgs = _peer_messages(req.question, req.tone_prompt or "")
     peer_results: list[dict] = []
     with ThreadPoolExecutor(max_workers=min(len(peers), 10)) as pool:
-        futs = {pool.submit(_run_one_model, m, peer_msgs): m for m in peers}
+        futs = {
+            pool.submit(_run_one_model, m, peer_msgs, peer_cap): m
+            for m in peers
+        }
         for fut in as_completed(futs):
             peer_results.append(fut.result())
 
     peers_succeeded = sum(1 for r in peer_results if (r.get("text") or "").strip())
 
     exec_msgs   = _exec_messages(req.question, peer_results, req.tone_prompt or "")
-    exec_result = _run_one_model(exec_key, exec_msgs)
+    exec_result = _run_one_model(exec_key, exec_msgs, max_tokens=exec_cap)
 
     return _build_response(
         answer      = exec_result.get("text") or "",
