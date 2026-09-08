@@ -2878,6 +2878,23 @@ def build_ui():
                         "＋ New Seance", scale=0, size="sm",
                         variant="secondary",
                     )
+                    # Recover last unsaved chat from the quick-chat
+                    # autosave file (_autosave_new_seance.json). Hidden
+                    # by default; demo.load below shows it only when a
+                    # recent autosave exists — surfaces the recovery
+                    # affordance only when there's something to recover.
+                    # Fixes the mobile pain point: iOS Safari suspends
+                    # background tabs mid-response, and the user returns
+                    # to a fresh session losing their chat. The autosave
+                    # is written server-side after each Ask, so the
+                    # response IS preserved; this button pulls it back.
+                    ao_recover_btn = gr.Button(
+                        "🔄 Recover last chat",
+                        scale=0, size="sm",
+                        variant="primary",
+                        visible=False,
+                        elem_id="ao_recover_btn",
+                    )
                     ao_seance_name_display = gr.Markdown(
                         "🕯 **Current Seance:** New Seance",
                         elem_id="ao_seance_name_display",
@@ -5465,6 +5482,93 @@ def build_ui():
                         "", [], "", "",
                     )
 
+                # Quick-chat recovery — loads _autosave_new_seance.json
+                # into the current session (same shape as seance load
+                # but keeps the header "New Seance" and the path state
+                # empty so the 3-turn autosave rule still applies to
+                # any further turns). Mobile Safari suspends background
+                # tabs; the response completes server-side but the
+                # client comes back to a fresh session. This restores.
+                _AUTOSAVE_RECOVERY_WINDOW_SECONDS = 3600   # 1 hour
+
+                def _autosave_recent() -> bool:
+                    """True iff _autosave_new_seance.json exists AND
+                    was written in the last _AUTOSAVE_RECOVERY_WINDOW
+                    seconds. Used by demo.load to decide whether to
+                    surface the 🔄 Recover button."""
+                    p = SEANCES_DIR / _AUTOSAVE_NEW_FILE
+                    if not p.exists():
+                        return False
+                    try:
+                        age = time.time() - p.stat().st_mtime
+                        return age <= _AUTOSAVE_RECOVERY_WINDOW_SECONDS
+                    except OSError:
+                        return False
+
+                def on_ao_recover_autosave():
+                    """Restore the quick-chat autosave into the current
+                    session. Header stays 'New Seance' so the same
+                    3-turn autosave rule keeps protecting further turns.
+                    Return shape matches on_ao_seances_load + a
+                    visibility update to hide the Recover button after
+                    successful load."""
+                    empty_ret = (
+                        [], 0, "No autosaved chat to recover.", "",
+                        gr.update(value="—"),
+                        "",                       # ao_question blank
+                        "New Seance",
+                        "🕯 **Current Seance:** New Seance",
+                        "",                       # ao_seance_path_state
+                        [],                       # ao_history_state
+                        "",                       # ao_current_q_state
+                        "",                       # ao_thread_below_state
+                        gr.update(visible=False), # ao_recover_btn (hide)
+                    )
+                    p = SEANCES_DIR / _AUTOSAVE_NEW_FILE
+                    if not p.exists():
+                        return empty_ret
+                    try:
+                        s = json.loads(p.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError) as e:
+                        log.warning("Autosave unreadable: %s", e)
+                        return empty_ret
+                    s_results = s.get("s_results", []) or []
+                    history   = s.get("history", []) or []
+                    if not s_results:
+                        return empty_ret
+                    idx = min(int(s.get("s_idx", 0) or 0),
+                               len(s_results) - 1)
+                    slide = s_results[idx]
+                    lbl = f"{slide['model_display']}  ·  {slide['elapsed']}s"
+                    loaded_q = (
+                        (history[-1].get("q") if history else "")
+                        or s.get("question", "")
+                        or ""
+                    )
+                    reconstructed_below = _reconstruct_thread_below(history)
+                    display_text = _render_thread(
+                        loaded_q,
+                        slide.get("response", ""),
+                        reconstructed_below,
+                    )
+                    return (
+                        s_results, idx,
+                        f"🔄 Recovered autosave — {len(history)} turn(s) "
+                        f"of memory · showing slide {idx + 1} of "
+                        f"{len(s_results)}. Continue typing to resume; "
+                        "hit 💾 Save Seance to keep it under a name.",
+                        display_text,
+                        gr.update(value=lbl),
+                        "",                       # ao_question blank
+                        "New Seance",             # header stays New Seance
+                        "🕯 **Current Seance:** New Seance",
+                        "",                       # keep path empty
+                        history,
+                        loaded_q,
+                        reconstructed_below,
+                        gr.update(visible=False), # hide Recover button
+                    )
+
                 def on_ao_seances_rename(selected_label, new_name,
                                           current_seance_name):
                     """Rename the on-disk file for the selected seance to
@@ -5555,6 +5659,32 @@ def build_ui():
                              ao_seance_name_state, ao_seance_name_display,
                              ao_seance_path_state, ao_history_state,
                              ao_current_q_state, ao_thread_below_state],
+                    queue=False,
+                )
+                # 🔄 Recover last chat — restores the quick-chat
+                # autosave into the current session. See on_ao_recover
+                # above for the return-shape rationale.
+                ao_recover_btn.click(
+                    on_ao_recover_autosave,
+                    outputs=[s_results_ao, s_idx_ao, ao_status, ao_response,
+                             ao_model_label, ao_question,
+                             ao_seance_name_state, ao_seance_name_display,
+                             ao_seance_path_state, ao_history_state,
+                             ao_current_q_state, ao_thread_below_state,
+                             ao_recover_btn],
+                    queue=False,
+                )
+                # On page mount, surface the 🔄 Recover button only
+                # when a recent quick-chat autosave exists. This fires
+                # after every mount — including the mobile "come back
+                # to browser" reload that lost the client's state
+                # while the server-side autosave completed. Threshold
+                # in _AUTOSAVE_RECOVERY_WINDOW_SECONDS above.
+                def _on_load_show_recover():
+                    return gr.update(visible=_autosave_recent())
+                demo.load(
+                    _on_load_show_recover,
+                    outputs=[ao_recover_btn],
                     queue=False,
                 )
                 ao_seances_rename_btn.click(
