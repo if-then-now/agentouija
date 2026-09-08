@@ -2931,17 +2931,6 @@ def build_ui():
                         ao_save_seance_btn = gr.Button(
                             "💾 Save Seance", variant="secondary", scale=1,
                         )
-                        # Manual draft restore — pulls the last saved
-                        # question (localStorage) into the textbox. See
-                        # the demo.load JS above for the write side.
-                        # Kept in the button row (no extra vertical
-                        # space above the textbox) with size="sm" so
-                        # it reads as a secondary action.
-                        ao_refresh_draft_btn = gr.Button(
-                            "🔄 Refresh", variant="secondary",
-                            scale=1, size="sm",
-                            elem_id="ao_refresh_draft_btn",
-                        )
                     ao_status = gr.Markdown("")
 
                     with gr.Group():
@@ -2968,7 +2957,7 @@ def build_ui():
                         # accordion's "Add To RAG (no score)" button.
                         with gr.Row():
                             ao_inline_rag_btn = gr.Button(
-                                "💾 Add This to RAG",
+                                "💾 Add To RAG",
                                 size="sm",
                                 variant="secondary",
                                 scale=0,
@@ -2987,6 +2976,20 @@ def build_ui():
                                 size="sm",
                                 variant="secondary",
                                 scale=0,
+                            )
+                            # Manual draft restore — pulls the last
+                            # auto-saved question (localStorage) into
+                            # the textbox. Companion to the auto-save
+                            # keystroke handler set up in demo.load
+                            # further up. Placed alongside Add To RAG
+                            # and Send File so all three post-response
+                            # affordances live in the same row.
+                            ao_refresh_draft_btn = gr.Button(
+                                "🔄 Refresh",
+                                size="sm",
+                                variant="secondary",
+                                scale=0,
+                                elem_id="ao_refresh_draft_btn",
                             )
                         ao_response_audio = gr.Audio(
                             label="Agent Ouija speaks",
