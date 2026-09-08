@@ -2588,37 +2588,65 @@ def build_ui():
             js="""() => {
                 const url = new URL(window.location);
                 const cur = url.searchParams.get('__theme');
-                url.searchParams.set(
-                    '__theme', cur === 'dark' ? 'light' : 'dark'
-                );
+                const next = cur === 'dark' ? 'light' : 'dark';
+                url.searchParams.set('__theme', next);
+                // Remember the choice so future no-param visits (e.g.
+                // launcher opens localhost:7860, browser bookmarks
+                // without the param, PWA installs) land on the same
+                // theme instead of drifting to the OS system pref.
+                try { localStorage.setItem('agent_ouija_theme', next); }
+                catch (e) { /* private mode */ }
                 window.location = url.toString();
             }""",
         )
 
-        # No forced-theme redirect on first visit anymore.
+        # First-visit / no-param theme alignment.
         #
-        # The previous implementation ran a `window.location = ...`
-        # navigation from a demo.load() JS block to default the URL to
-        # `?__theme=dark`. That was a full page reload — which meant
-        # any text a fast-typing user had already entered in the
-        # question textbox got wiped when the reload fired (demo.load
-        # doesn't run until after the page has mounted, giving the
-        # user a small window to start typing before the redirect).
+        # If the URL has no `?__theme=`, check localStorage — if the
+        # user has toggled before, respect their choice. Otherwise
+        # default to dark (the app's designed home). Either way we
+        # redirect ONCE with the theme param so Gradio's native
+        # theme system takes over from there. Fixes the "Brainy
+        # sometimes opens light" report — Windows 11's auto-day/night
+        # was flipping the OS system preference under Gradio, so
+        # no-param visits inherited whichever mode Windows was in
+        # at load time.
         #
-        # Users now get the system-preference theme on first visit;
-        # the 🌓 Toggle Theme button in the header still swaps to a
-        # specific `__theme=` value and reloads (with the user's
-        # explicit consent), and the choice sticks via the URL.
+        # If URL already has `?__theme=`, sync it INTO localStorage
+        # so a URL-driven visit updates the stored preference too.
+        # Safe now that the question textbox uses on-demand Refresh
+        # instead of auto-restore — a one-time reload can't wipe
+        # in-flight typing because there is no in-flight typing on
+        # a fresh mount.
+        demo.load(
+            fn=None,
+            js="""() => {
+                const url = new URL(window.location);
+                const urlTheme = url.searchParams.get('__theme');
+                if (urlTheme) {
+                    try { localStorage.setItem('agent_ouija_theme', urlTheme); }
+                    catch (e) {}
+                    return;
+                }
+                let stored = null;
+                try { stored = localStorage.getItem('agent_ouija_theme'); }
+                catch (e) {}
+                const target = (stored === 'light') ? 'light' : 'dark';
+                url.searchParams.set('__theme', target);
+                window.location = url.toString();
+            }""",
+        )
 
         # Question textbox draft persistence.
         #
-        # Save every keystroke in ao_question to localStorage and
-        # restore on page mount. Belt-and-braces protection against
-        # ANY event that wipes the textbox — accidental theme toggle,
-        # F5, tab close-and-reopen, browser restart, Gradio websocket
-        # reconnect. The draft is cleared when the user clicks any
-        # Ask button (they've committed the question and don't need
-        # a lingering draft after).
+        # Every keystroke in ao_question is saved to localStorage. On
+        # page mount we DON'T auto-restore — that behaviour surprised
+        # users when a stale draft from a previous session showed up
+        # unbidden. Instead, a small `🔄 Refresh` button in the Ask
+        # row pulls the saved draft into the textbox on demand (see
+        # the button's click handler further down for the read side).
+        # Draft is cleared when the user clicks any Ask button —
+        # they've committed the question and don't need it back.
         demo.load(
             fn=None,
             js=r"""
@@ -2632,17 +2660,6 @@ def build_ui():
               const attach = () => {
                 const q = findQ();
                 if (!q) return false;
-
-                // Restore any prior draft, but only if the box is empty
-                // (don't overwrite in-flight typing on re-mount).
-                try {
-                  const saved = localStorage.getItem(STORAGE_KEY);
-                  if (saved && !q.value) {
-                    q.value = saved;
-                    // Fire input so React/Gradio's own state notices.
-                    q.dispatchEvent(new Event('input', {bubbles: true}));
-                  }
-                } catch (e) { /* localStorage denied — degrade silently */ }
 
                 // Save every keystroke.
                 q.addEventListener('input', () => {
@@ -2913,6 +2930,17 @@ def build_ui():
                         )
                         ao_save_seance_btn = gr.Button(
                             "💾 Save Seance", variant="secondary", scale=1,
+                        )
+                        # Manual draft restore — pulls the last saved
+                        # question (localStorage) into the textbox. See
+                        # the demo.load JS above for the write side.
+                        # Kept in the button row (no extra vertical
+                        # space above the textbox) with size="sm" so
+                        # it reads as a secondary action.
+                        ao_refresh_draft_btn = gr.Button(
+                            "🔄 Refresh", variant="secondary",
+                            scale=1, size="sm",
+                            elem_id="ao_refresh_draft_btn",
                         )
                     ao_status = gr.Markdown("")
 
@@ -4454,16 +4482,35 @@ def build_ui():
                     ao_retry_btn,
                 ]
 
-                # Auto-save helper — quiet side-effect after each Ask
-                # when a seance has been loaded (or manually Saved once
-                # this session). Overwrites the same file on disk so
-                # every follow-up question is preserved in the loaded
-                # seance without the user having to click Save again.
+                # Auto-save helper — quiet side-effect after each Ask.
+                #
+                # Two paths:
+                #   (a) Named seance (path already set — either loaded
+                #       from disk or manually Saved this session):
+                #       overwrites the same file on disk so every
+                #       follow-up question is preserved without the
+                #       user having to click Save again.
+                #   (b) Fresh "New Seance" (no path yet): auto-saves
+                #       to `_autosave_new_seance.json` for the FIRST
+                #       THREE turns as a safety net — quick chats get
+                #       preserved without a manual Save. After 3
+                #       turns we stop; the user is expected to hit
+                #       Save Seance if they want the thread kept.
+                #       The `_` prefix keeps the autosave file out of
+                #       the Seances dropdown (see _list_seances).
+                _AUTOSAVE_NEW_FILE  = "_autosave_new_seance.json"
+                _AUTOSAVE_NEW_LIMIT = 3
                 def _ao_autosave(seance_path, seance_name, question,
                                   level, s_results, s_idx,
                                   last_exec_tier, current_q, history):
-                    if not seance_path or not s_results:
+                    if not s_results:
                         return
+                    if not seance_path:
+                        # New Seance path — quick-chat safety net.
+                        turn_count = len(history or [])
+                        if turn_count > _AUTOSAVE_NEW_LIMIT:
+                            return   # user needs to Save manually now
+                        seance_path = _AUTOSAVE_NEW_FILE
                     p = SEANCES_DIR / seance_path
                     existing = {}
                     if p.exists():
@@ -4592,6 +4639,32 @@ def build_ui():
                     outputs=[ao_status],
                     cancels=[_ask_event_1, _ask_event_2,
                               _lore_event_1, _lore_event_2],
+                    queue=False,
+                )
+
+                # 🔄 Refresh — pulls the last-typed draft out of
+                # localStorage and puts it back in ao_question. Manual
+                # counterpart to the auto-save keystroke handler above.
+                # JS-only handler; no Python round-trip needed. Fires
+                # an input event so Gradio's state notices the change.
+                ao_refresh_draft_btn.click(
+                    fn=None,
+                    js=r"""
+                    () => {
+                      const STORAGE_KEY = 'agent_ouija_question_draft';
+                      const q = document.querySelector(
+                        '#ao_question textarea, #ao_question input'
+                      );
+                      if (!q) return;
+                      try {
+                        const saved = localStorage.getItem(STORAGE_KEY);
+                        if (saved) {
+                          q.value = saved;
+                          q.dispatchEvent(new Event('input', {bubbles: true}));
+                        }
+                      } catch (e) { /* localStorage denied */ }
+                    }
+                    """,
                     queue=False,
                 )
 
@@ -5183,6 +5256,12 @@ def build_ui():
                         return []
                     out = []
                     for p in sorted(SEANCES_DIR.glob("*.json"), reverse=True):
+                        # Skip the quick-chat autosave slot — it's a
+                        # recovery file, not a proper seance the user
+                        # picked a name for. The `_` prefix is our
+                        # convention for internal seance files.
+                        if p.name.startswith("_"):
+                            continue
                         try:
                             data = json.loads(p.read_text(encoding="utf-8"))
                             data["_path"] = str(p)
