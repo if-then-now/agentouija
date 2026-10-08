@@ -1,5 +1,6 @@
 from pathlib import Path
 import math
+import os
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 # BASE_DIR resolves dynamically to the repo root — config.py sits under
@@ -418,6 +419,52 @@ TTS_VOICES_DIR    = BASE_DIR / "voices"
 # isn't actually on disk. Value is just the voice id, no extension.
 ACTIVE_VOICE_PATH = TTS_VOICES_DIR / "active_voice.txt"
 TTS_MAX_CHARS     = 2000      # truncate longer responses to keep synth snappy
+
+# ── TTS provider dispatch ─────────────────────────────────────────────────────
+# Which backend tts.synth_to_wav() dials. "piper" is the default (local,
+# free, air-gap capable — matches the project's edge-AI story). "openai"
+# routes to tts-1-hd using OPENAI_API_KEY for premium, consistent prosody
+# across daily use. "elevenlabs" is reserved — the backend module isn't
+# wired yet; selecting it logs a warning and degrades to Piper.
+#
+# Set the environment variable TTS_PROVIDER to override at launch time
+# without a config edit — useful on Rahul's personal rig where the premium
+# voice is wanted, while public installs keep the Piper default.
+TTS_PROVIDER      = os.environ.get("TTS_PROVIDER", "piper").strip().lower()
+
+# OpenAI TTS settings. Model "tts-1-hd" is the premium tier (slightly
+# slower synth, markedly better prosody than "tts-1"). Voices (one of
+# alloy / echo / fable / onyx / nova / shimmer) can be swapped via the
+# TTS_OPENAI_VOICE env var at launch time without a config edit.
+TTS_OPENAI_MODEL  = "tts-1-hd"
+TTS_OPENAI_VOICE  = os.environ.get("TTS_OPENAI_VOICE", "onyx").strip().lower()
+
+# ── STT — Microphone input (optional, personal-rig voice chat) ────────────────
+# Transcribes mic recordings into the question textbox for daily voice
+# conversations with the agent. Default provider is "openai" (uses the
+# same OPENAI_API_KEY as everything else, no extra deps). "faster-whisper"
+# runs locally on the RTX 5080 for an offline-capable path — requires
+# `pip install faster-whisper` and is probed lazily. "off" (or missing
+# API key / missing dep) hides the mic UI silently.
+#
+# Mobile Safari / Chrome require HTTPS for navigator.mediaDevices to
+# expose the microphone. On the Tailscale rig this is covered by
+# `tailscale serve` which fronts the Gradio port with a trusted cert.
+STT_PROVIDER       = os.environ.get("STT_PROVIDER", "openai").strip().lower()
+# OpenAI's current speech-to-text model id. gpt-4o-transcribe is their
+# newer tier with better accuracy; whisper-1 is the budget option.
+# Override via env for cost/quality tuning without a config edit.
+STT_OPENAI_MODEL   = os.environ.get("STT_OPENAI_MODEL", "whisper-1").strip()
+# faster-whisper on-rig model when STT_PROVIDER="faster-whisper".
+# "small.en" is the latency sweet spot on an RTX 5080; "base.en" is
+# faster/less accurate; "medium.en" is slower/more accurate.
+STT_LOCAL_MODEL    = os.environ.get("STT_LOCAL_MODEL", "small.en").strip()
+STT_LOCAL_DEVICE   = os.environ.get("STT_LOCAL_DEVICE", "cuda").strip()
+STT_LOCAL_COMPUTE  = os.environ.get("STT_LOCAL_COMPUTE", "float16").strip()
+# Hard upper bound on recording length sent to the transcriber. Keeps
+# cost + latency bounded if the user forgets to stop recording. 2 min
+# at 16 kHz mono WAV is ~3.8 MB; well under API payload limits.
+STT_MAX_SECONDS    = 120
 
 # ── NewsAPI (daily news pulls into RAG) ───────────────────────────────────────
 # Free tier at https://newsapi.org — 100 requests/day.

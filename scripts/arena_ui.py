@@ -167,6 +167,7 @@ from rag import (
     wipe_chroma_collection,
 )
 from serper_search import search as serper_search
+from stt import is_available as _stt_available, transcribe as _stt_transcribe
 from tts import set_active_voice, synth_to_wav
 from summarize import generate_summary, generate_trainer_report
 from tagger import load_keyword_map, tag_by_keywords
@@ -2912,6 +2913,22 @@ def build_ui():
                         label="Question",
                         placeholder="What would you like to know?",
                         lines=3, max_lines=10,
+                        elem_id="ao_question",
+                    )
+                    # Mic input — only rendered when scripts/stt.py reports
+                    # a usable backend (API key present / dep installed).
+                    # Record, stop, we transcribe, text lands in the
+                    # question box; user still has to click Ask so a
+                    # misheard phrase can be corrected before firing.
+                    # Mobile Safari/Chrome require HTTPS → use Tailscale
+                    # serve to front localhost:7860 (SETUP.md §4b).
+                    _ao_mic_enabled = _stt_available()
+                    ao_mic = gr.Audio(
+                        sources=["microphone"],
+                        type="filepath",
+                        label="🎙️ Speak your question",
+                        visible=_ao_mic_enabled,
+                        elem_id="ao_mic",
                     )
                     with gr.Row():
                         ao_ask_btn = gr.Button(
@@ -4459,6 +4476,36 @@ def build_ui():
                     outputs=[ao_response_audio],
                     queue=False,
                 )
+
+                # Mic input → transcribe + append into the question box.
+                # We append (with a space separator) rather than replace
+                # so a user can speak-then-type, or append a second
+                # thought without losing the first. If transcription
+                # returns None (missing key, API error, empty record),
+                # the textbox stays as-is. We also clear the recording
+                # after transcription so the next click starts fresh;
+                # Gradio's gr.Audio otherwise holds onto the clip until
+                # the user manually clears it.
+                def _ao_transcribe_mic(audio_path, current_q):
+                    if not audio_path:
+                        return gr.update(), gr.update()
+                    text = _stt_transcribe(audio_path)
+                    if not text:
+                        return gr.update(), gr.update(value=None)
+                    cur = (current_q or "").rstrip()
+                    merged = f"{cur} {text}".strip() if cur else text
+                    return (
+                        gr.update(value=merged),
+                        gr.update(value=None),
+                    )
+
+                if _ao_mic_enabled:
+                    ao_mic.stop_recording(
+                        _ao_transcribe_mic,
+                        inputs=[ao_mic, ao_question],
+                        outputs=[ao_question, ao_mic],
+                        queue=True,
+                    )
 
                 def _ao_maybe_synth(voice_on, s_results, s_idx):
                     """Speak only the CURRENT slide's raw response — not

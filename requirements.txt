@@ -66,6 +66,16 @@ Pillow>=10.0
 # wrapper degrades to None on ImportError).
 piper-tts>=1.2
 
+# ── Microphone input / premium voice (feature-voice-stack) — OPTIONAL ────────
+# When config.STT_PROVIDER="openai" (default) or config.TTS_PROVIDER="openai",
+# the mic + premium-voice backends reuse the existing openai sdk already
+# pulled in by LiteLLM — no extra install needed. Mobile browsers require
+# HTTPS for navigator.mediaDevices.getUserMedia; on Tailscale rigs,
+# `tailscale serve` fronts the port with a trusted cert (SETUP.md §4b).
+#
+# For a fully-local STT path (STT_PROVIDER="faster-whisper"), uncomment:
+# faster-whisper>=1.0
+
 # ── Notes ────────────────────────────────────────────────────────────────────
 # Not pip-installed:
 #   - Ollama runtime (https://ollama.com/download) — required for local models

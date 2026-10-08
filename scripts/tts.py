@@ -1,8 +1,15 @@
 """
-tts.py — Piper TTS for the Arena tab Voice toggle.
+tts.py — Agent Ouija text-to-speech dispatcher.
 
-Fully local, free, MIT-licensed. No cloud calls. Uses the same air-gap-
-capable design philosophy as the rest of Agent Ouija.
+Routes synth_to_wav() through whichever backend config.TTS_PROVIDER
+points at: "piper" (local, free, MIT; the public-release default) or
+"openai" (tts-1-hd via the existing OPENAI_API_KEY, premium prosody for
+daily conversational use on Rahul's personal rig).
+
+The Piper code below is the original implementation — unchanged, still
+air-gap capable. The OpenAI backend and dispatcher are appended at the
+end of the module so single-provider users (either Piper or OpenAI) hit
+exactly one code path per call.
 
 One-time setup (Brainy):
     pip install piper-tts
@@ -36,7 +43,15 @@ import wave
 from pathlib import Path
 from typing import Optional
 
-from config import ACTIVE_VOICE_PATH, TTS_MAX_CHARS, TTS_VOICE, TTS_VOICES_DIR
+from config import (
+    ACTIVE_VOICE_PATH,
+    TTS_MAX_CHARS,
+    TTS_OPENAI_MODEL,
+    TTS_OPENAI_VOICE,
+    TTS_PROVIDER,
+    TTS_VOICE,
+    TTS_VOICES_DIR,
+)
 
 log = logging.getLogger(__name__)
 
@@ -408,17 +423,9 @@ def _try_legacy_synthesize(voice, text: str, wav_path: str,
     return Path(wav_path).stat().st_size > _MIN_AUDIO_BYTES
 
 
-def synth_to_wav(text: Optional[str]) -> Optional[Path]:
-    """Synthesize text to a temporary WAV file. Returns path or None.
-
-    Never raises — failures are logged and surfaced as None so the caller
-    (the Arena slideshow handlers) can degrade gracefully without
-    crashing the UI on a missing voice / pip dep.
-
-    Truncates input to TTS_MAX_CHARS so synth latency stays bounded on
-    long-form responses. The Arena slideshow already shows the full text
-    in the response box; the voice is a UX enhancement, not a verbatim
-    read-aloud transcript.
+def _synth_piper(text: str) -> Optional[Path]:
+    """Piper backend. Caller is responsible for cleaning + truncating text;
+    this just picks the right Piper API shape and writes the WAV.
 
     Tries multiple Piper API shapes in order of preference:
         1. voice.synthesize_wav(text, wav)   — cleanest, 1.2+
@@ -428,18 +435,6 @@ def synth_to_wav(text: Optional[str]) -> Optional[Path]:
     larger than just a WAV header — otherwise we'd silently "succeed"
     with an empty-audio file (the bug Brainy hit on first ship).
     """
-    if not text or not text.strip():
-        return None
-
-    # Strip markdown / emoji / code BEFORE truncating so we don't waste the
-    # char budget on formatting noise that wouldn't be spoken anyway.
-    text = clean_for_speech(text)
-    if not text:
-        return None
-
-    if len(text) > TTS_MAX_CHARS:
-        text = text[:TTS_MAX_CHARS].rstrip() + "… response truncated for speech."
-
     try:
         voice = _load_voice()
     except Exception:
@@ -468,6 +463,138 @@ def synth_to_wav(text: Optional[str]) -> Optional[Path]:
             errors.append(f"{name}: {type(e).__name__}: {e}")
             log.debug("Piper %s API failed (%s)", name, e)
 
-    log.warning("TTS synth failed — all Piper APIs unproductive: %s",
+    log.warning("Piper synth failed — all APIs unproductive: %s",
                 "; ".join(errors))
     return None
+
+
+# ── OpenAI TTS backend ───────────────────────────────────────────────────────
+# tts-1-hd via the existing OPENAI_API_KEY. Premium prosody suitable for
+# daily conversational use. The response is a complete audio file; we save
+# it to a .mp3 temp file (Gradio's gr.Audio handles mp3 natively) and
+# return the path. On any failure (missing key, missing dep, API error),
+# we fall back to Piper so the Voice toggle never silently breaks.
+_OPENAI_CLIENT      = None
+_OPENAI_LOAD_ERROR  = None
+
+
+def _get_openai_client():
+    """Lazy-load the OpenAI client singleton. Caches success + failure so
+    we don't re-import on every TTS call. The openai sdk is already a
+    LiteLLM dep in this repo, so this import rarely fails."""
+    global _OPENAI_CLIENT, _OPENAI_LOAD_ERROR
+    if _OPENAI_CLIENT is not None:
+        return _OPENAI_CLIENT
+    if _OPENAI_LOAD_ERROR is not None:
+        raise _OPENAI_LOAD_ERROR
+
+    import os
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        _OPENAI_LOAD_ERROR = RuntimeError(
+            "OPENAI_API_KEY not set — add it to .env to use the OpenAI "
+            "TTS backend, or set TTS_PROVIDER=piper to use the local voice."
+        )
+        raise _OPENAI_LOAD_ERROR
+
+    try:
+        from openai import OpenAI  # type: ignore
+    except ImportError as e:
+        _OPENAI_LOAD_ERROR = ImportError(
+            f"openai sdk not installed: pip install openai ({e})"
+        )
+        raise _OPENAI_LOAD_ERROR
+
+    try:
+        _OPENAI_CLIENT = OpenAI(api_key=api_key)
+        return _OPENAI_CLIENT
+    except Exception as e:
+        _OPENAI_LOAD_ERROR = e
+        raise
+
+
+def _synth_openai(text: str) -> Optional[Path]:
+    """OpenAI tts-1-hd backend. Writes an mp3 to a temp file; returns the
+    Path or None on any failure (caller falls back to Piper)."""
+    try:
+        client = _get_openai_client()
+    except Exception as e:
+        log.warning("OpenAI TTS unavailable (%s: %s) — caller will fall back",
+                    type(e).__name__, e)
+        return None
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+    tmp.close()
+    out_path = Path(tmp.name)
+
+    try:
+        # The streaming interface is the recommended path per OpenAI's
+        # docs — writes to disk incrementally so very long synth jobs
+        # don't buffer the whole response in memory.
+        with client.audio.speech.with_streaming_response.create(
+            model=TTS_OPENAI_MODEL,
+            voice=TTS_OPENAI_VOICE,
+            input=text,
+        ) as response:
+            response.stream_to_file(str(out_path))
+    except Exception as e:
+        log.warning("OpenAI TTS synth failed (%s: %s)", type(e).__name__, e)
+        try:
+            out_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+
+    if out_path.stat().st_size <= _MIN_AUDIO_BYTES:
+        log.warning("OpenAI TTS returned near-empty audio — treating as failure")
+        try:
+            out_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+
+    return out_path
+
+
+def synth_to_wav(text: Optional[str]) -> Optional[Path]:
+    """Synthesize text to a temporary audio file. Returns path or None.
+
+    Dispatches on config.TTS_PROVIDER:
+        "piper"   → local Piper, returns .wav
+        "openai"  → OpenAI tts-1-hd (premium), returns .mp3 (gr.Audio
+                    handles both formats transparently)
+
+    OpenAI failures fall back to Piper so the Voice toggle never silently
+    breaks when the API has a bad minute. Piper failures just return None
+    — the UI gracefully no-ops the audio player.
+
+    Never raises. Truncates input to TTS_MAX_CHARS so synth latency stays
+    bounded on long-form responses — the UI already shows the full text
+    in the response box; the voice is a UX enhancement.
+
+    The function name says "wav" for historical reasons; the suffix of
+    the returned file depends on the backend (.wav for Piper, .mp3 for
+    OpenAI). Callers only need the Path.
+    """
+    if not text or not text.strip():
+        return None
+
+    # Clean + truncate once up front so every backend gets the same input.
+    text = clean_for_speech(text)
+    if not text:
+        return None
+    if len(text) > TTS_MAX_CHARS:
+        text = text[:TTS_MAX_CHARS].rstrip() + "… response truncated for speech."
+
+    provider = (TTS_PROVIDER or "piper").lower()
+    if provider == "openai":
+        path = _synth_openai(text)
+        if path is not None:
+            return path
+        log.info("Falling back to Piper after OpenAI TTS failure.")
+        return _synth_piper(text)
+
+    if provider not in ("piper", "", "local"):
+        log.warning("Unknown TTS_PROVIDER=%r — falling back to Piper.",
+                    TTS_PROVIDER)
+    return _synth_piper(text)
