@@ -116,6 +116,7 @@ from config import (
     BASE_DIR,
     BILLING_LINKS,
     CHAT_HISTORY_PATH,
+    CHAT_MODE_SILENCE_SECONDS,
     CONVERSATION_HISTORY_WINDOW,
     CUSTOM_ACTIVE_FLAG,
     CUSTOM_PROMPTS_DIR,
@@ -2601,6 +2602,143 @@ def build_ui():
             }""",
         )
 
+        # ── Chat Mode: silence monitor + response autoplay observer ──────
+        # Two client-side helpers live on `window.` so Gradio event
+        # handlers (start_recording / stop_recording JS .then() shims)
+        # can call them without re-defining the code every event:
+        #
+        #   __aoStartSilenceMonitor(seconds)  → opens a parallel mic
+        #       stream, measures RMS via AudioContext/AnalyserNode. Once
+        #       speech has been detected and the signal stays below the
+        #       threshold for `seconds` consecutive seconds, it clicks
+        #       the Gradio stop-recording button. That triggers the
+        #       normal transcribe + auto-Ask chain in Chat Mode.
+        #
+        #   __aoStopSilenceMonitor()          → tears down the parallel
+        #       stream + rAF loop. Called on every stop_recording event
+        #       so we never leave a stream open.
+        #
+        # The MutationObserver watches #ao_response_audio for value /
+        # src changes and calls .play() when Chat Mode is on. The
+        # Gradio Audio component has autoplay=True, but mobile Safari /
+        # Chrome require user-gesture propagation per element — the
+        # observer re-asserts play() each time Gradio swaps the audio
+        # path, which rides on the recording-stop user gesture.
+        demo.load(
+            fn=None,
+            js=r"""
+            () => {
+              if (window.__aoVoiceHelpersInstalled) return;
+              window.__aoVoiceHelpersInstalled = true;
+
+              const state = {
+                audioContext: null,
+                analyser: null,
+                stream: null,
+                rafId: null,
+                silenceStart: null,
+                heardSpeech: false,
+              };
+
+              window.__aoStopSilenceMonitor = function() {
+                if (state.rafId) cancelAnimationFrame(state.rafId);
+                if (state.stream) {
+                  try { state.stream.getTracks().forEach(t => t.stop()); }
+                  catch (e) {}
+                }
+                if (state.audioContext) {
+                  try { state.audioContext.close(); } catch (e) {}
+                }
+                state.audioContext = null;
+                state.analyser = null;
+                state.stream = null;
+                state.rafId = null;
+                state.silenceStart = null;
+                state.heardSpeech = false;
+              };
+
+              window.__aoStartSilenceMonitor = async function(seconds) {
+                const SILENCE_MS = (seconds || 10) * 1000;
+                const THRESHOLD = 0.015;
+                window.__aoStopSilenceMonitor();
+                try {
+                  state.stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                      echoCancellation: true,
+                      noiseSuppression: true,
+                      autoGainControl: true,
+                    },
+                  });
+                  const Ctx = window.AudioContext || window.webkitAudioContext;
+                  state.audioContext = new Ctx();
+                  state.analyser = state.audioContext.createAnalyser();
+                  state.analyser.fftSize = 1024;
+                  const src = state.audioContext.createMediaStreamSource(state.stream);
+                  src.connect(state.analyser);
+                  const buf = new Uint8Array(state.analyser.fftSize);
+                  const tick = () => {
+                    if (!state.analyser) return;
+                    state.analyser.getByteTimeDomainData(buf);
+                    let sumSq = 0;
+                    for (let i = 0; i < buf.length; i++) {
+                      const v = (buf[i] - 128) / 128;
+                      sumSq += v * v;
+                    }
+                    const rms = Math.sqrt(sumSq / buf.length);
+                    const now = performance.now();
+                    if (rms > THRESHOLD) {
+                      state.heardSpeech = true;
+                      state.silenceStart = null;
+                    } else if (state.heardSpeech) {
+                      if (state.silenceStart === null) {
+                        state.silenceStart = now;
+                      } else if (now - state.silenceStart > SILENCE_MS) {
+                        const mic = document.querySelector('#ao_mic');
+                        const stopBtn =
+                          (mic && (
+                            mic.querySelector('button[aria-label*="Stop" i]') ||
+                            mic.querySelector('button[title*="Stop" i]') ||
+                            mic.querySelector('button.record-button') ||
+                            mic.querySelector('button[aria-label*="record" i]')
+                          ));
+                        window.__aoStopSilenceMonitor();
+                        if (stopBtn) stopBtn.click();
+                        return;
+                      }
+                    }
+                    state.rafId = requestAnimationFrame(tick);
+                  };
+                  tick();
+                } catch (e) {
+                  console.warn('silence monitor failed:', e);
+                  window.__aoStopSilenceMonitor();
+                }
+              };
+
+              const attachAutoplay = () => {
+                const container = document.querySelector('#ao_response_audio');
+                if (!container) { setTimeout(attachAutoplay, 500); return; }
+                const chatBox = () => document.querySelector(
+                  '#ao_chat_mode input[type="checkbox"]'
+                );
+                const tryPlay = () => {
+                  const a = container.querySelector('audio');
+                  if (!a) return;
+                  const cb = chatBox();
+                  if (!cb || !cb.checked) return;
+                  a.play().catch(err => console.debug('autoplay nudged:', err));
+                };
+                const obs = new MutationObserver(tryPlay);
+                obs.observe(container, {
+                  childList: true, subtree: true,
+                  attributes: true, attributeFilter: ['src'],
+                });
+              };
+              attachAutoplay();
+            }
+            """,
+        )
+
         # First-visit / no-param theme alignment.
         #
         # If the URL has no `?__theme=`, check localStorage — if the
@@ -3028,6 +3166,7 @@ def build_ui():
                         ao_response_audio = gr.Audio(
                             label="Agent Ouija speaks",
                             autoplay=True, visible=False, interactive=False,
+                            elem_id="ao_response_audio",
                         )
                     # Inline escalation prompts — shown after an executive
                     # slide runs; hidden otherwise. When a Junior exec just
@@ -4525,19 +4664,43 @@ def build_ui():
                     # chain (ask → synth → autosave) fires in full. The
                     # 60ms delay gives Gradio a tick to commit the
                     # textbox value from the preceding .then() before
-                    # the click's input-collection snapshots it.
+                    # the click's input-collection snapshots it. Also
+                    # tears down the silence monitor if it's still live.
                     _mic_stop_evt.then(
                         None,
                         inputs=[ao_chat_mode],
                         outputs=None,
                         js=(
-                            "(chat_on) => { if (chat_on) { "
-                            "  setTimeout(() => { "
-                            "    const b = document.querySelector('#ao_ask_btn'); "
-                            "    if (b) b.click(); "
-                            "  }, 60); "
-                            "} }"
+                            "(chat_on) => { "
+                            "  if (window.__aoStopSilenceMonitor) "
+                            "    window.__aoStopSilenceMonitor(); "
+                            "  if (chat_on) { "
+                            "    setTimeout(() => { "
+                            "      const b = document.querySelector('#ao_ask_btn'); "
+                            "      if (b) b.click(); "
+                            "    }, 60); "
+                            "  } "
+                            "}"
                         ),
+                    )
+                    # When Chat Mode is on, start the silence monitor
+                    # as soon as the user taps Record. The monitor
+                    # watches mic RMS and clicks the Gradio stop button
+                    # after N consecutive seconds of silence (default
+                    # 10, config.CHAT_MODE_SILENCE_SECONDS). The stop
+                    # event then runs the full transcribe + auto-Ask
+                    # chain above.
+                    ao_mic.start_recording(
+                        None,
+                        inputs=[ao_chat_mode],
+                        outputs=None,
+                        js=(
+                            "(chat_on) => { "
+                            "  if (chat_on && window.__aoStartSilenceMonitor) "
+                            f"    window.__aoStartSilenceMonitor({int(CHAT_MODE_SILENCE_SECONDS)}); "
+                            "}"
+                        ),
+                        queue=False,
                     )
 
                 # Chat Mode flips the Voice toggle on when enabled so the

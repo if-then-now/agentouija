@@ -465,6 +465,10 @@ STT_LOCAL_COMPUTE  = os.environ.get("STT_LOCAL_COMPUTE", "float16").strip()
 # cost + latency bounded if the user forgets to stop recording. 2 min
 # at 16 kHz mono WAV is ~3.8 MB; well under API payload limits.
 STT_MAX_SECONDS    = 120
+# Chat Mode: how many seconds of mic silence before we auto-stop the
+# recording and fire Ask. Client-side (JS AudioContext RMS). Tune lower
+# for snappier back-and-forth, higher if you need thinking pauses.
+CHAT_MODE_SILENCE_SECONDS = 10
 
 # ── NewsAPI (daily news pulls into RAG) ───────────────────────────────────────
 # Free tier at https://newsapi.org — 100 requests/day.
