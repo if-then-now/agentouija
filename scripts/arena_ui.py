@@ -2715,6 +2715,44 @@ def build_ui():
                 }
               };
 
+              // iOS Safari / Android Chrome require user-gesture
+              // propagation per <audio> element. autoplay=True + a
+              // src-change observer alone fails because by the time the
+              // model + TTS finish, the gesture token from the record
+              // tap has expired. Prime the element on known gestures
+              // (Chat Mode toggle, Record tap) so subsequent play()
+              // calls succeed even in a stale-gesture context.
+              const SILENT_WAV = 'data:audio/wav;base64,' +
+                'UklGRkYAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YSIA' +
+                'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==';
+
+              window.__aoPrimeAudio = function() {
+                const a = document.querySelector('#ao_response_audio audio');
+                if (!a) return;
+                if (a.dataset.aoPrimed === 'yes') return;
+                try {
+                  const prevSrc = a.src;
+                  const prevVol = a.volume;
+                  a.src = SILENT_WAV;
+                  a.volume = 0;
+                  const p = a.play();
+                  if (p && p.then) {
+                    p.then(() => {
+                      try { a.pause(); } catch (e) {}
+                      a.currentTime = 0;
+                      a.volume = prevVol || 1;
+                      a.dataset.aoPrimed = 'yes';
+                      if (prevSrc && prevSrc !== SILENT_WAV) a.src = prevSrc;
+                      else a.removeAttribute('src');
+                    }).catch(() => {
+                      a.volume = prevVol || 1;
+                    });
+                  }
+                } catch (e) {
+                  console.warn('audio prime failed:', e);
+                }
+              };
+
               const attachAutoplay = () => {
                 const container = document.querySelector('#ao_response_audio');
                 if (!container) { setTimeout(attachAutoplay, 500); return; }
@@ -2726,13 +2764,27 @@ def build_ui():
                   if (!a) return;
                   const cb = chatBox();
                   if (!cb || !cb.checked) return;
+                  if (!a.src || a.src.endsWith(SILENT_WAV)) return;
                   a.play().catch(err => console.debug('autoplay nudged:', err));
                 };
+                // Observe DOM changes (new <audio> element, attribute
+                // swaps) AND poll — Gradio's internal update path isn't
+                // guaranteed to surface as a watched mutation on every
+                // version, and the poll overhead is trivial.
                 const obs = new MutationObserver(tryPlay);
                 obs.observe(container, {
                   childList: true, subtree: true,
                   attributes: true, attributeFilter: ['src'],
                 });
+                let lastSrc = '';
+                setInterval(() => {
+                  const a = container.querySelector('audio');
+                  if (!a || !a.src) return;
+                  if (a.src === lastSrc) return;
+                  if (a.src.endsWith(SILENT_WAV)) return;
+                  lastSrc = a.src;
+                  tryPlay();
+                }, 500);
               };
               attachAutoplay();
             }
@@ -4696,8 +4748,11 @@ def build_ui():
                         outputs=None,
                         js=(
                             "(chat_on) => { "
-                            "  if (chat_on && window.__aoStartSilenceMonitor) "
-                            f"    window.__aoStartSilenceMonitor({int(CHAT_MODE_SILENCE_SECONDS)}); "
+                            "  if (chat_on) { "
+                            "    if (window.__aoPrimeAudio) window.__aoPrimeAudio(); "
+                            "    if (window.__aoStartSilenceMonitor) "
+                            f"      window.__aoStartSilenceMonitor({int(CHAT_MODE_SILENCE_SECONDS)}); "
+                            "  } "
                             "}"
                         ),
                         queue=False,
@@ -4718,6 +4773,16 @@ def build_ui():
                         inputs=[ao_chat_mode, ao_voice_toggle],
                         outputs=[ao_voice_toggle],
                         queue=False,
+                    ).then(
+                        None,
+                        inputs=[ao_chat_mode],
+                        outputs=None,
+                        js=(
+                            "(chat_on) => { "
+                            "  if (chat_on && window.__aoPrimeAudio) "
+                            "    window.__aoPrimeAudio(); "
+                            "}"
+                        ),
                     )
 
                 def _ao_maybe_synth(voice_on, s_results, s_idx):
