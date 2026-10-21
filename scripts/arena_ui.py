@@ -2715,41 +2715,57 @@ def build_ui():
                 }
               };
 
-              // iOS Safari / Android Chrome require user-gesture
-              // propagation per <audio> element. autoplay=True + a
-              // src-change observer alone fails because by the time the
-              // model + TTS finish, the gesture token from the record
-              // tap has expired. Prime the element on known gestures
-              // (Chat Mode toggle, Record tap) so subsequent play()
-              // calls succeed even in a stale-gesture context.
-              const SILENT_WAV = 'data:audio/wav;base64,' +
-                'UklGRkYAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YSIA' +
-                'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==';
+              // Mobile Safari / Chrome will not autoplay an <audio>
+              // element even with autoplay=True once the originating
+              // user gesture is stale (and ours is: tap-Record → 10s
+              // silence → model call → TTS → audio update, 10-15s
+              // elapsed easily). Priming the element did not survive
+              // Gradio's internal DOM swaps.
+              //
+              // AudioContext, once resumed inside a gesture, stays
+              // unlocked for the session with no per-play gesture
+              // needed. So: resume an AudioContext when the user
+              // toggles Chat Mode or taps Record, then play every
+              // response through that context by fetching + decoding
+              // the audio URL Gradio hands us.
+              let aoAudioCtx = null;
+              let aoCurrentSource = null;
 
-              window.__aoPrimeAudio = function() {
-                const a = document.querySelector('#ao_response_audio audio');
-                if (!a) return;
-                if (a.dataset.aoPrimed === 'yes') return;
+              window.__aoPrimeAudio = async function() {
                 try {
-                  const prevSrc = a.src;
-                  const prevVol = a.volume;
-                  a.src = SILENT_WAV;
-                  a.volume = 0;
-                  const p = a.play();
-                  if (p && p.then) {
-                    p.then(() => {
-                      try { a.pause(); } catch (e) {}
-                      a.currentTime = 0;
-                      a.volume = prevVol || 1;
-                      a.dataset.aoPrimed = 'yes';
-                      if (prevSrc && prevSrc !== SILENT_WAV) a.src = prevSrc;
-                      else a.removeAttribute('src');
-                    }).catch(() => {
-                      a.volume = prevVol || 1;
-                    });
+                  if (!aoAudioCtx) {
+                    const Ctx = window.AudioContext || window.webkitAudioContext;
+                    if (!Ctx) return;
+                    aoAudioCtx = new Ctx();
+                  }
+                  if (aoAudioCtx.state === 'suspended') {
+                    await aoAudioCtx.resume();
                   }
                 } catch (e) {
-                  console.warn('audio prime failed:', e);
+                  console.warn('audio context resume failed:', e);
+                }
+              };
+
+              window.__aoPlayCurrentResponse = async function() {
+                if (!aoAudioCtx || aoAudioCtx.state !== 'running') return;
+                const a = document.querySelector('#ao_response_audio audio');
+                if (!a || !a.src) return;
+                try {
+                  if (aoCurrentSource) {
+                    try { aoCurrentSource.stop(); } catch (e) {}
+                    aoCurrentSource = null;
+                  }
+                  const resp = await fetch(a.src);
+                  if (!resp.ok) return;
+                  const buf = await resp.arrayBuffer();
+                  const decoded = await aoAudioCtx.decodeAudioData(buf);
+                  const src = aoAudioCtx.createBufferSource();
+                  src.buffer = decoded;
+                  src.connect(aoAudioCtx.destination);
+                  src.start(0);
+                  aoCurrentSource = src;
+                } catch (e) {
+                  console.warn('Web Audio play failed:', e);
                 }
               };
 
@@ -2759,32 +2775,27 @@ def build_ui():
                 const chatBox = () => document.querySelector(
                   '#ao_chat_mode input[type="checkbox"]'
                 );
-                const tryPlay = () => {
+                let lastSrc = '';
+                const tick = () => {
                   const a = container.querySelector('audio');
-                  if (!a) return;
+                  if (!a || !a.src) return;
+                  if (a.src === lastSrc) return;
                   const cb = chatBox();
                   if (!cb || !cb.checked) return;
-                  if (!a.src || a.src.endsWith(SILENT_WAV)) return;
-                  a.play().catch(err => console.debug('autoplay nudged:', err));
+                  lastSrc = a.src;
+                  // Mute the Gradio-rendered audio element so it
+                  // doesn't try to play silently in parallel with the
+                  // Web Audio source. User can still unmute manually
+                  // via its own controls if they want to replay.
+                  try { a.muted = true; } catch (e) {}
+                  window.__aoPlayCurrentResponse();
                 };
-                // Observe DOM changes (new <audio> element, attribute
-                // swaps) AND poll — Gradio's internal update path isn't
-                // guaranteed to surface as a watched mutation on every
-                // version, and the poll overhead is trivial.
-                const obs = new MutationObserver(tryPlay);
+                const obs = new MutationObserver(tick);
                 obs.observe(container, {
                   childList: true, subtree: true,
                   attributes: true, attributeFilter: ['src'],
                 });
-                let lastSrc = '';
-                setInterval(() => {
-                  const a = container.querySelector('audio');
-                  if (!a || !a.src) return;
-                  if (a.src === lastSrc) return;
-                  if (a.src.endsWith(SILENT_WAV)) return;
-                  lastSrc = a.src;
-                  tryPlay();
-                }, 500);
+                setInterval(tick, 500);
               };
               attachAutoplay();
             }
