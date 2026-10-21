@@ -2631,54 +2631,141 @@ def build_ui():
               if (window.__aoVoiceHelpersInstalled) return;
               window.__aoVoiceHelpersInstalled = true;
 
-              const state = {
-                audioContext: null,
+              // ONE shared AudioContext across prime, silence
+              // detection, and playback. iOS Safari's audio session
+              // gets confused when a page spins up multiple contexts
+              // concurrently — on real-device testing, having a
+              // separate playback context broke the silence-monitor
+              // context's getUserMedia path. Share and conquer.
+              let aoCtx = null;
+              let aoCurrentSource = null;
+
+              const getCtx = () => {
+                if (!aoCtx) {
+                  const Ctx = window.AudioContext || window.webkitAudioContext;
+                  if (!Ctx) {
+                    console.warn('[AO voice] no AudioContext support');
+                    return null;
+                  }
+                  aoCtx = new Ctx();
+                  console.log('[AO voice] AudioContext created, state=', aoCtx.state);
+                }
+                return aoCtx;
+              };
+
+              const resumeCtx = async () => {
+                const ctx = getCtx();
+                if (!ctx) return null;
+                if (ctx.state === 'suspended') {
+                  try { await ctx.resume(); }
+                  catch (e) { console.warn('[AO voice] resume failed:', e); }
+                }
+                return ctx;
+              };
+
+              window.__aoPrimeAudio = async function() {
+                const ctx = await resumeCtx();
+                console.log('[AO voice] prime; ctx state=', ctx && ctx.state);
+              };
+
+              window.__aoPlayCurrentResponse = async function() {
+                const ctx = await resumeCtx();
+                if (!ctx || ctx.state !== 'running') {
+                  console.warn('[AO voice] play: context not running');
+                  return;
+                }
+                const a = document.querySelector('#ao_response_audio audio');
+                if (!a || !a.src) {
+                  console.debug('[AO voice] play: no audio src yet');
+                  return;
+                }
+                try {
+                  if (aoCurrentSource) {
+                    try { aoCurrentSource.stop(); } catch (e) {}
+                    aoCurrentSource = null;
+                  }
+                  console.log('[AO voice] fetching', a.src);
+                  const resp = await fetch(a.src);
+                  if (!resp.ok) {
+                    console.warn('[AO voice] fetch not ok:', resp.status);
+                    return;
+                  }
+                  const buf = await resp.arrayBuffer();
+                  const decoded = await ctx.decodeAudioData(buf);
+                  const src = ctx.createBufferSource();
+                  src.buffer = decoded;
+                  src.connect(ctx.destination);
+                  src.start(0);
+                  aoCurrentSource = src;
+                  console.log('[AO voice] playing via Web Audio');
+                } catch (e) {
+                  console.warn('[AO voice] Web Audio play failed:', e);
+                  // Fallback: unmute Gradio's own audio and play().
+                  try {
+                    a.muted = false;
+                    const p = a.play();
+                    if (p && p.catch) p.catch(err =>
+                      console.warn('[AO voice] HTMLAudio fallback failed:', err)
+                    );
+                  } catch (err) {
+                    console.warn('[AO voice] HTMLAudio fallback threw:', err);
+                  }
+                }
+              };
+
+              // Silence monitor state (uses the shared ctx).
+              const silence = {
                 analyser: null,
                 stream: null,
+                sourceNode: null,
                 rafId: null,
                 silenceStart: null,
                 heardSpeech: false,
               };
 
               window.__aoStopSilenceMonitor = function() {
-                if (state.rafId) cancelAnimationFrame(state.rafId);
-                if (state.stream) {
-                  try { state.stream.getTracks().forEach(t => t.stop()); }
+                if (silence.rafId) cancelAnimationFrame(silence.rafId);
+                if (silence.sourceNode) {
+                  try { silence.sourceNode.disconnect(); } catch (e) {}
+                }
+                if (silence.stream) {
+                  try { silence.stream.getTracks().forEach(t => t.stop()); }
                   catch (e) {}
                 }
-                if (state.audioContext) {
-                  try { state.audioContext.close(); } catch (e) {}
-                }
-                state.audioContext = null;
-                state.analyser = null;
-                state.stream = null;
-                state.rafId = null;
-                state.silenceStart = null;
-                state.heardSpeech = false;
+                silence.analyser = null;
+                silence.sourceNode = null;
+                silence.stream = null;
+                silence.rafId = null;
+                silence.silenceStart = null;
+                silence.heardSpeech = false;
               };
 
               window.__aoStartSilenceMonitor = async function(seconds) {
                 const SILENCE_MS = (seconds || 10) * 1000;
                 const THRESHOLD = 0.015;
                 window.__aoStopSilenceMonitor();
+                const ctx = await resumeCtx();
+                if (!ctx) {
+                  console.warn('[AO voice] silence: no ctx');
+                  return;
+                }
                 try {
-                  state.stream = await navigator.mediaDevices.getUserMedia({
+                  silence.stream = await navigator.mediaDevices.getUserMedia({
                     audio: {
                       echoCancellation: true,
                       noiseSuppression: true,
                       autoGainControl: true,
                     },
                   });
-                  const Ctx = window.AudioContext || window.webkitAudioContext;
-                  state.audioContext = new Ctx();
-                  state.analyser = state.audioContext.createAnalyser();
-                  state.analyser.fftSize = 1024;
-                  const src = state.audioContext.createMediaStreamSource(state.stream);
-                  src.connect(state.analyser);
-                  const buf = new Uint8Array(state.analyser.fftSize);
+                  silence.analyser = ctx.createAnalyser();
+                  silence.analyser.fftSize = 1024;
+                  silence.sourceNode = ctx.createMediaStreamSource(silence.stream);
+                  silence.sourceNode.connect(silence.analyser);
+                  const buf = new Uint8Array(silence.analyser.fftSize);
+                  console.log('[AO voice] silence monitor armed', seconds, 's');
                   const tick = () => {
-                    if (!state.analyser) return;
-                    state.analyser.getByteTimeDomainData(buf);
+                    if (!silence.analyser) return;
+                    silence.analyser.getByteTimeDomainData(buf);
                     let sumSq = 0;
                     for (let i = 0; i < buf.length; i++) {
                       const v = (buf[i] - 128) / 128;
@@ -2687,88 +2774,39 @@ def build_ui():
                     const rms = Math.sqrt(sumSq / buf.length);
                     const now = performance.now();
                     if (rms > THRESHOLD) {
-                      state.heardSpeech = true;
-                      state.silenceStart = null;
-                    } else if (state.heardSpeech) {
-                      if (state.silenceStart === null) {
-                        state.silenceStart = now;
-                      } else if (now - state.silenceStart > SILENCE_MS) {
+                      if (!silence.heardSpeech) {
+                        console.log('[AO voice] speech detected');
+                      }
+                      silence.heardSpeech = true;
+                      silence.silenceStart = null;
+                    } else if (silence.heardSpeech) {
+                      if (silence.silenceStart === null) {
+                        silence.silenceStart = now;
+                      } else if (now - silence.silenceStart > SILENCE_MS) {
                         const mic = document.querySelector('#ao_mic');
-                        const stopBtn =
-                          (mic && (
-                            mic.querySelector('button[aria-label*="Stop" i]') ||
-                            mic.querySelector('button[title*="Stop" i]') ||
-                            mic.querySelector('button.record-button') ||
-                            mic.querySelector('button[aria-label*="record" i]')
-                          ));
+                        const stopBtn = mic && (
+                          mic.querySelector('button[aria-label*="Stop" i]') ||
+                          mic.querySelector('button[title*="Stop" i]') ||
+                          mic.querySelector('button.record-button') ||
+                          mic.querySelector('button[aria-label*="record" i]') ||
+                          mic.querySelector('button')
+                        );
+                        console.log('[AO voice] silence timeout; clicking', stopBtn);
                         window.__aoStopSilenceMonitor();
                         if (stopBtn) stopBtn.click();
                         return;
                       }
                     }
-                    state.rafId = requestAnimationFrame(tick);
+                    silence.rafId = requestAnimationFrame(tick);
                   };
                   tick();
                 } catch (e) {
-                  console.warn('silence monitor failed:', e);
+                  console.warn('[AO voice] silence monitor failed:', e);
                   window.__aoStopSilenceMonitor();
                 }
               };
 
-              // Mobile Safari / Chrome will not autoplay an <audio>
-              // element even with autoplay=True once the originating
-              // user gesture is stale (and ours is: tap-Record → 10s
-              // silence → model call → TTS → audio update, 10-15s
-              // elapsed easily). Priming the element did not survive
-              // Gradio's internal DOM swaps.
-              //
-              // AudioContext, once resumed inside a gesture, stays
-              // unlocked for the session with no per-play gesture
-              // needed. So: resume an AudioContext when the user
-              // toggles Chat Mode or taps Record, then play every
-              // response through that context by fetching + decoding
-              // the audio URL Gradio hands us.
-              let aoAudioCtx = null;
-              let aoCurrentSource = null;
-
-              window.__aoPrimeAudio = async function() {
-                try {
-                  if (!aoAudioCtx) {
-                    const Ctx = window.AudioContext || window.webkitAudioContext;
-                    if (!Ctx) return;
-                    aoAudioCtx = new Ctx();
-                  }
-                  if (aoAudioCtx.state === 'suspended') {
-                    await aoAudioCtx.resume();
-                  }
-                } catch (e) {
-                  console.warn('audio context resume failed:', e);
-                }
-              };
-
-              window.__aoPlayCurrentResponse = async function() {
-                if (!aoAudioCtx || aoAudioCtx.state !== 'running') return;
-                const a = document.querySelector('#ao_response_audio audio');
-                if (!a || !a.src) return;
-                try {
-                  if (aoCurrentSource) {
-                    try { aoCurrentSource.stop(); } catch (e) {}
-                    aoCurrentSource = null;
-                  }
-                  const resp = await fetch(a.src);
-                  if (!resp.ok) return;
-                  const buf = await resp.arrayBuffer();
-                  const decoded = await aoAudioCtx.decodeAudioData(buf);
-                  const src = aoAudioCtx.createBufferSource();
-                  src.buffer = decoded;
-                  src.connect(aoAudioCtx.destination);
-                  src.start(0);
-                  aoCurrentSource = src;
-                } catch (e) {
-                  console.warn('Web Audio play failed:', e);
-                }
-              };
-
+              // Watch for response audio updates and play them.
               const attachAutoplay = () => {
                 const container = document.querySelector('#ao_response_audio');
                 if (!container) { setTimeout(attachAutoplay, 500); return; }
@@ -2783,10 +2821,6 @@ def build_ui():
                   const cb = chatBox();
                   if (!cb || !cb.checked) return;
                   lastSrc = a.src;
-                  // Mute the Gradio-rendered audio element so it
-                  // doesn't try to play silently in parallel with the
-                  // Web Audio source. User can still unmute manually
-                  // via its own controls if they want to replay.
                   try { a.muted = true; } catch (e) {}
                   window.__aoPlayCurrentResponse();
                 };
@@ -2798,6 +2832,7 @@ def build_ui():
                 setInterval(tick, 500);
               };
               attachAutoplay();
+              console.log('[AO voice] helpers installed');
             }
             """,
         )
