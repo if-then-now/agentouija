@@ -3667,6 +3667,19 @@ def build_ui():
                         value=False,
                         label="🔊 Voice (Agent Ouija speaks)",
                     )
+                    # Chat Mode — one switch for daily voice conversations.
+                    # ON   → voice output + mic visible + Ask fires
+                    #        automatically when a recording stops.
+                    # OFF  → everything is manual (voice toggle, record,
+                    #        click Ask) — the public-install default.
+                    # Hidden entirely when STT isn't configured, since
+                    # chat mode without mic input would just toggle voice.
+                    ao_chat_mode = gr.Checkbox(
+                        value=False,
+                        label="💬 Chat Mode (auto-mic, auto-voice, auto-ask)",
+                        visible=_ao_mic_enabled,
+                        elem_id="ao_chat_mode",
+                    )
 
                 # ── Slideshow state ──────────────────────────────────────
                 s_results_ao = gr.State([])
@@ -4500,11 +4513,48 @@ def build_ui():
                     )
 
                 if _ao_mic_enabled:
-                    ao_mic.stop_recording(
+                    _mic_stop_evt = ao_mic.stop_recording(
                         _ao_transcribe_mic,
                         inputs=[ao_mic, ao_question],
                         outputs=[ao_question, ao_mic],
                         queue=True,
+                    )
+                    # Auto-fire Ask when Chat Mode is on. Pure client-side
+                    # JS so we don't have to re-plumb the Ask button's
+                    # 15-input signature here — the existing handler
+                    # chain (ask → synth → autosave) fires in full. The
+                    # 60ms delay gives Gradio a tick to commit the
+                    # textbox value from the preceding .then() before
+                    # the click's input-collection snapshots it.
+                    _mic_stop_evt.then(
+                        None,
+                        inputs=[ao_chat_mode],
+                        outputs=None,
+                        js=(
+                            "(chat_on) => { if (chat_on) { "
+                            "  setTimeout(() => { "
+                            "    const b = document.querySelector('#ao_ask_btn'); "
+                            "    if (b) b.click(); "
+                            "  }, 60); "
+                            "} }"
+                        ),
+                    )
+
+                # Chat Mode flips the Voice toggle on when enabled so the
+                # user doesn't have to also tick 🔊 Voice. We don't force
+                # it off when Chat Mode goes off — the user may want
+                # voice without auto-ask (e.g. driving).
+                def _ao_chat_mode_change(chat_on, voice_on):
+                    if chat_on and not voice_on:
+                        return gr.update(value=True)
+                    return gr.update()
+
+                if _ao_mic_enabled:
+                    ao_chat_mode.change(
+                        _ao_chat_mode_change,
+                        inputs=[ao_chat_mode, ao_voice_toggle],
+                        outputs=[ao_voice_toggle],
+                        queue=False,
                     )
 
                 def _ao_maybe_synth(voice_on, s_results, s_idx):
