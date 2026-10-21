@@ -469,6 +469,12 @@ STT_MAX_SECONDS    = 120
 # recording and fire Ask. Client-side (JS AudioContext RMS). Tune lower
 # for snappier back-and-forth, higher if you need thinking pauses.
 CHAT_MODE_SILENCE_SECONDS = 10
+# Hands-free continuous mode: how long to wait for the first word on an
+# auto-restarted recording before concluding the conversation is over
+# and shutting the mic off cleanly (no auto-Ask fires). Tune lower if
+# you want faster "wake lock" release, higher if you often pause before
+# responding to the agent.
+CHAT_MODE_NO_SPEECH_SECONDS = 30
 
 # ── NewsAPI (daily news pulls into RAG) ───────────────────────────────────────
 # Free tier at https://newsapi.org — 100 requests/day.

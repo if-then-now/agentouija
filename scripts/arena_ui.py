@@ -116,6 +116,7 @@ from config import (
     BASE_DIR,
     BILLING_LINKS,
     CHAT_HISTORY_PATH,
+    CHAT_MODE_NO_SPEECH_SECONDS,
     CHAT_MODE_SILENCE_SECONDS,
     CONVERSATION_HISTORY_WINDOW,
     CUSTOM_ACTIVE_FLAG,
@@ -2698,6 +2699,34 @@ def build_ui():
                   src.start(0);
                   aoCurrentSource = src;
                   console.log('[AO voice] playing via Web Audio');
+                  // Hands-free continuation: when the response audio
+                  // finishes, auto-click Record so the user can speak
+                  // again without touching the phone. Guarded by Chat
+                  // Mode being on at the moment playback ends — so a
+                  // user who toggled off mid-response doesn't get the
+                  // mic unexpectedly re-armed.
+                  src.onended = () => {
+                    const cb = document.querySelector(
+                      '#ao_chat_mode input[type="checkbox"]'
+                    );
+                    if (!cb || !cb.checked) return;
+                    const mic = document.querySelector('#ao_mic');
+                    if (!mic) return;
+                    const tryClick = (attempts) => {
+                      const btn =
+                        mic.querySelector('button[aria-label*="Record" i]') ||
+                        mic.querySelector('button[title*="Record" i]') ||
+                        mic.querySelector('button.record-button') ||
+                        mic.querySelector('button');
+                      if (btn) {
+                        console.log('[AO voice] response ended; auto-record');
+                        btn.click();
+                      } else if (attempts > 0) {
+                        setTimeout(() => tryClick(attempts - 1), 300);
+                      }
+                    };
+                    tryClick(5);
+                  };
                 } catch (e) {
                   console.warn('[AO voice] Web Audio play failed:', e);
                   // Fallback: unmute Gradio's own audio and play().
@@ -2740,8 +2769,9 @@ def build_ui():
                 silence.heardSpeech = false;
               };
 
-              window.__aoStartSilenceMonitor = async function(seconds) {
+              window.__aoStartSilenceMonitor = async function(seconds, noSpeechSeconds) {
                 const SILENCE_MS = (seconds || 10) * 1000;
+                const NO_SPEECH_MS = (noSpeechSeconds || 30) * 1000;
                 const THRESHOLD = 0.015;
                 window.__aoStopSilenceMonitor();
                 const ctx = await resumeCtx();
@@ -2762,7 +2792,19 @@ def build_ui():
                   silence.sourceNode = ctx.createMediaStreamSource(silence.stream);
                   silence.sourceNode.connect(silence.analyser);
                   const buf = new Uint8Array(silence.analyser.fftSize);
-                  console.log('[AO voice] silence monitor armed', seconds, 's');
+                  const startedAt = performance.now();
+                  console.log('[AO voice] silence monitor armed; silence=',
+                              seconds, 's no-speech=', noSpeechSeconds, 's');
+                  const findStopBtn = () => {
+                    const mic = document.querySelector('#ao_mic');
+                    return mic && (
+                      mic.querySelector('button[aria-label*="Stop" i]') ||
+                      mic.querySelector('button[title*="Stop" i]') ||
+                      mic.querySelector('button.record-button') ||
+                      mic.querySelector('button[aria-label*="record" i]') ||
+                      mic.querySelector('button')
+                    );
+                  };
                   const tick = () => {
                     if (!silence.analyser) return;
                     silence.analyser.getByteTimeDomainData(buf);
@@ -2780,18 +2822,24 @@ def build_ui():
                       silence.heardSpeech = true;
                       silence.silenceStart = null;
                     } else if (silence.heardSpeech) {
+                      // Post-speech silence → end of utterance.
                       if (silence.silenceStart === null) {
                         silence.silenceStart = now;
                       } else if (now - silence.silenceStart > SILENCE_MS) {
-                        const mic = document.querySelector('#ao_mic');
-                        const stopBtn = mic && (
-                          mic.querySelector('button[aria-label*="Stop" i]') ||
-                          mic.querySelector('button[title*="Stop" i]') ||
-                          mic.querySelector('button.record-button') ||
-                          mic.querySelector('button[aria-label*="record" i]') ||
-                          mic.querySelector('button')
-                        );
+                        const stopBtn = findStopBtn();
                         console.log('[AO voice] silence timeout; clicking', stopBtn);
+                        window.__aoStopSilenceMonitor();
+                        if (stopBtn) stopBtn.click();
+                        return;
+                      }
+                    } else {
+                      // Still waiting for the first word. If the
+                      // user walked away or stopped responding, bail
+                      // out cleanly without firing a bogus empty Ask.
+                      if (now - startedAt > NO_SPEECH_MS) {
+                        const stopBtn = findStopBtn();
+                        console.log('[AO voice] no-speech timeout; ending conversation');
+                        window.__aoNoSpeechHang = true;
                         window.__aoStopSilenceMonitor();
                         if (stopBtn) stopBtn.click();
                         return;
@@ -4772,6 +4820,11 @@ def build_ui():
                             "(chat_on) => { "
                             "  if (window.__aoStopSilenceMonitor) "
                             "    window.__aoStopSilenceMonitor(); "
+                            "  if (window.__aoNoSpeechHang) { "
+                            "    window.__aoNoSpeechHang = false; "
+                            "    console.log('[AO voice] skipping Ask — no speech'); "
+                            "    return; "
+                            "  } "
                             "  if (chat_on) { "
                             "    setTimeout(() => { "
                             "      const b = document.querySelector('#ao_ask_btn'); "
@@ -4797,7 +4850,7 @@ def build_ui():
                             "  if (chat_on) { "
                             "    if (window.__aoPrimeAudio) window.__aoPrimeAudio(); "
                             "    if (window.__aoStartSilenceMonitor) "
-                            f"      window.__aoStartSilenceMonitor({int(CHAT_MODE_SILENCE_SECONDS)}); "
+                            f"      window.__aoStartSilenceMonitor({int(CHAT_MODE_SILENCE_SECONDS)}, {int(CHAT_MODE_NO_SPEECH_SECONDS)}); "
                             "  } "
                             "}"
                         ),
